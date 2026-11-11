@@ -1,0 +1,23 @@
+# Environment & secrets
+.env
+*.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-py314-backup/
+venv/
+.ipynb_checkpoints/
+
+# Vector DB (large binary data)
+chroma_db/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

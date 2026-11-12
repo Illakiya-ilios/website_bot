@@ -1,0 +1,79 @@
+# Pages from ilios.digital indexed into the bot's knowledge base (one URL per line).
+# Lines starting with '#' and blank lines are ignored.
+# Pages are fetched when the API starts. Unchanged pages are skipped; changed
+# pages are re-indexed automatically. Restart the API after editing this file.
+#
+# Source: https://ilios.digital/sitemap.xml plus the case-study pages linked
+# from /insights/case-studies. Each page was checked against the existing
+# knowledge base on 2026-11-12; all contain information it didn't have.
+# /services is left out: it serves the same content as /services/cloud.
+
+# Company
+https://www.ilios.digital/
+https://www.ilios.digital/about
+https://www.ilios.digital/leadership
+https://www.ilios.digital/projects
+https://www.ilios.digital/careers
+https://www.ilios.digital/contact
+
+# Cloud & DevOps
+https://www.ilios.digital/services/cloud
+https://www.ilios.digital/services/cloud/multi-cloud-architecture-migration
+https://www.ilios.digital/services/cloud/devops-infrastructure-as-code
+https://www.ilios.digital/services/cloud/platform-engineering-containers
+https://www.ilios.digital/services/cloud/finops-cloud-cost-optimization
+https://www.ilios.digital/services/cloud/site-reliability-engineering
+
+# Software development
+https://www.ilios.digital/services/software-development
+https://www.ilios.digital/services/software-development/app-portfolio-assessment-strategy
+https://www.ilios.digital/services/software-development/application-modernization-refactoring
+https://www.ilios.digital/services/software-development/custom-enterprise-app-development
+https://www.ilios.digital/services/software-development/api-engineering-integration
+https://www.ilios.digital/services/software-development/quality-engineering-test-automation
+
+# AI solutions
+https://www.ilios.digital/services/ai-solutions
+https://www.ilios.digital/services/ai-solutions/genai-strategy-readiness
+https://www.ilios.digital/services/ai-solutions/llm-fine-tuning-rag
+https://www.ilios.digital/services/ai-solutions/agentic-ai-autonomous-workflows
+https://www.ilios.digital/services/ai-solutions/enterprise-knowledge-copilots
+https://www.ilios.digital/services/ai-solutions/responsible-ai-governance
+
+# Cybersecurity
+https://www.ilios.digital/services/cybersecurity
+https://www.ilios.digital/services/cybersecurity/managed-soc-threat-response
+https://www.ilios.digital/services/cybersecurity/zero-trust-architecture-identity
+https://www.ilios.digital/services/cybersecurity/cloud-network-security
+https://www.ilios.digital/services/cybersecurity/vulnerability-management-pen-testing
+https://www.ilios.digital/services/cybersecurity/governance-risk-compliance
+
+# Managed services
+https://www.ilios.digital/services/managed-services
+https://www.ilios.digital/services/managed-services/managed-multi-cloud-hybrid-infra
+https://www.ilios.digital/services/managed-services/application-support-ams
+https://www.ilios.digital/services/managed-services/backup-disaster-recovery
+https://www.ilios.digital/services/managed-services/service-desk-aiops-observability
+
+# Partners
+https://www.ilios.digital/partners
+https://www.ilios.digital/partners/aws
+https://www.ilios.digital/partners/azure
+https://www.ilios.digital/partners/gcp
+https://www.ilios.digital/partners/claude
+
+# Industries
+https://www.ilios.digital/industries
+https://www.ilios.digital/industries/government-public-sector
+https://www.ilios.digital/industries/banking-financial-services-fintech
+https://www.ilios.digital/industries/healthcare-life-sciences
+https://www.ilios.digital/industries/enterprise-retail-smart-cities
+
+# Case studies
+https://www.ilios.digital/insights/case-studies
+https://www.ilios.digital/insights/case-studies/directorate-technical-education-tn
+https://www.ilios.digital/insights/case-studies/fiduccia-ventures-agentic-ai-recruitment
+https://www.ilios.digital/insights/case-studies/gcc-agentic-ai-municipal-finance
+https://www.ilios.digital/insights/case-studies/hrce-production-workload-migration
+https://www.ilios.digital/insights/case-studies/tnega-whatsapp-platform-migration
+https://www.ilios.digital/insights/case-studies/tn-finance-wamis-2

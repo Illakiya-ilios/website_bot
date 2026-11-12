@@ -12,8 +12,8 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 
-# Vector DB (large binary data)
-chroma_db/
+# Client-specific commercial pricing: never commit (the bot is public)
+DPDP_ELCOT_All_Products_Pricing.pdf
 
 # Logs
 *.log

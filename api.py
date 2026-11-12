@@ -28,9 +28,17 @@ from langchain_core.retrievers import BaseRetriever
 from typing import List
 from docx import Document as DocxDocument
 from collections import defaultdict
+from itertools import zip_longest
 from typing import Dict, List
 
 from guard import check_input, check_output
+from web_ingest import load_urls, read_web_page
+import hashlib
+import io
+import re
+from pypdf import PdfReader, PdfWriter
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 
 # =========================
@@ -161,63 +169,94 @@ memory_manager = SessionMemoryManager(max_messages=8)
 #        FILE READERS
 # =========================
 
-def read_pdf_with_textract(file_path):
-
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    textract = boto3.client("textract", region_name=AWS_REGION)
-
-    bucket = os.getenv("TEXTRACT_BUCKET_NAME")
-    if not bucket:
-        raise ValueError("TEXTRACT_BUCKET_NAME not set in .env")
-
-    file_name = os.path.basename(file_path)
-
-    s3.upload_file(file_path, bucket, file_name)
-
-    response = textract.start_document_text_detection(
-        DocumentLocation={
-            "S3Object": {
-                "Bucket": bucket,
-                "Name": file_name
-            }
-        }
-    )
-
-    job_id = response["JobId"]
-
-    while True:
-        result = textract.get_document_text_detection(JobId=job_id)
-        status = result["JobStatus"]
-
-        if status == "SUCCEEDED":
-            break
-        elif status == "FAILED":
-            raise Exception("Textract job failed")
-
-        time.sleep(2)
-
-    text = ""
-    pages = textract.get_document_text_detection(JobId=job_id)
-
-    while True:
-        for block in pages["Blocks"]:
-            if block["BlockType"] == "LINE":
-                text += block["Text"] + "\n"
-
-        if "NextToken" in pages:
-            pages = textract.get_document_text_detection(
-                JobId=job_id,
-                NextToken=pages["NextToken"]
-            )
-        else:
-            break
-
-    return text
-
-
 def read_word_file(file_path):
     doc = DocxDocument(file_path)
     return "\n".join([p.text for p in doc.paragraphs])
+
+
+def ocr_image_bytes(image_bytes):
+    """OCR a single image (PNG/JPEG, up to 10 MB) with Textract."""
+    textract = boto3.client("textract", region_name=AWS_REGION)
+    result = textract.detect_document_text(Document={"Bytes": image_bytes})
+    text = "\n".join(
+        b["Text"] for b in result["Blocks"] if b["BlockType"] == "LINE"
+    )
+    # OCR commonly reads "AI" as "Al" (lowercase L) in these decks.
+    return re.sub(r"\bAl\b", "AI", text)
+
+
+def read_pdf_text(file_path):
+    """
+    OCR every page with Textract. OCR is used even when the PDF has a text
+    layer, because these decks put a lot of their content inside images,
+    which a text layer doesn't contain.
+
+    Pages are sent one at a time to the synchronous Textract API (it accepts
+    single-page PDFs), so no S3 bucket is needed. Any failure propagates, so a
+    file is never indexed with missing pages.
+    """
+    reader = PdfReader(file_path)
+    print(f"  OCR: {os.path.basename(file_path)} ({len(reader.pages)} pages)")
+    pages = []
+    for page in reader.pages:
+        writer = PdfWriter()
+        writer.add_page(page)
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        pages.append(ocr_image_bytes(buffer.getvalue()))
+    return "\n\n".join(pages)
+
+
+def _collect_pptx_shapes(shapes, texts, pictures):
+    """Gather text, table rows and large pictures from slide shapes (incl. groups)."""
+    for shape in shapes:
+        try:
+            shape_type = shape.shape_type
+        except NotImplementedError:
+            shape_type = None
+
+        if shape_type == MSO_SHAPE_TYPE.GROUP:
+            _collect_pptx_shapes(shape.shapes, texts, pictures)
+            continue
+
+        if shape_type == MSO_SHAPE_TYPE.PICTURE:
+            width, _ = shape.image.size
+            if width >= 400:  # skip icons / logos
+                pictures.append(shape.image.blob)
+            continue
+
+        if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+            texts.append(shape.text_frame.text)
+
+        if getattr(shape, "has_table", False) and shape.has_table:
+            for row in shape.table.rows:
+                texts.append(" | ".join(cell.text.strip() for cell in row.cells))
+
+
+def read_pptx_file(file_path):
+    """
+    Extract slide text (speaker notes are deliberately ignored: they are
+    presenter coaching, not customer-facing content). Slides that are mostly
+    a picture (exported designs / screenshots) are OCR'd with Textract.
+    """
+    prs = Presentation(file_path)
+    slides = []
+
+    for number, slide in enumerate(prs.slides, start=1):
+        texts, pictures = [], []
+        _collect_pptx_shapes(slide.shapes, texts, pictures)
+        slide_text = "\n".join(t.strip() for t in texts if t.strip())
+
+        if len(slide_text) < 50 and pictures:
+            # Errors propagate on purpose: better to skip the file and retry
+            # on the next start than to index it with slides missing.
+            for blob in pictures:
+                slide_text = (slide_text + "\n" + ocr_image_bytes(blob)).strip()
+
+        if slide_text:
+            slides.append(slide_text)
+
+    return "\n\n".join(slides)
 
 
 # =========================
@@ -241,15 +280,26 @@ def ingest_file_into_db(file_path, db):
     print(f"Ingesting: {source_name}")
 
     if file_path.lower().endswith(".pdf"):
-        raw_text = read_pdf_with_textract(file_path)
+        raw_text = read_pdf_text(file_path)
     elif file_path.lower().endswith(".docx"):
         raw_text = read_word_file(file_path)
+    elif file_path.lower().endswith(".pptx"):
+        raw_text = read_pptx_file(file_path)
     else:
         print("Unsupported file type")
         return
 
     if not raw_text.strip():
         print("Empty text. Skipping.")
+        return
+
+    # Skip files whose text is identical to something already indexed
+    # (e.g. "Brochure (1).docx" copies).
+    content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    duplicate = db.get(where={"content_hash": content_hash}, include=["metadatas"])
+    if duplicate["ids"]:
+        original = (duplicate["metadatas"][0] or {}).get("source")
+        print(f"Skipping {source_name} (same content as {original})")
         return
 
     splitter = RecursiveCharacterTextSplitter(
@@ -259,7 +309,47 @@ def ingest_file_into_db(file_path, db):
 
     documents = splitter.create_documents(
         [raw_text],
-        metadatas=[{"source": source_name}]
+        metadatas=[{"source": source_name, "content_hash": content_hash}]
+    )
+
+    db.add_documents(documents)
+
+    print(f"Added {len(documents)} chunks.")
+
+
+def ingest_url_into_db(url, db):
+    """
+    Index the text of a public web page. The page URL is stored as the chunk
+    "source". A content hash is stored too, so on later startups the page is
+    skipped if unchanged and re-indexed (old chunks replaced) if it changed.
+    """
+    raw_text = read_web_page(url)
+
+    if not raw_text.strip():
+        print(f"No readable text at {url} (page may be rendered by JavaScript). Skipping.")
+        return
+
+    content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+
+    existing = db.get(where={"source": url}, include=["metadatas"])
+    if existing["ids"]:
+        old_hash = (existing["metadatas"][0] or {}).get("content_hash")
+        if old_hash == content_hash:
+            print(f"Skipping {url} (unchanged)")
+            return
+        print(f"Page changed, re-indexing: {url}")
+        db.delete(ids=existing["ids"])
+    else:
+        print(f"Ingesting page: {url}")
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=100
+    )
+
+    documents = splitter.create_documents(
+        [raw_text],
+        metadatas=[{"source": url, "content_hash": content_hash}]
     )
 
     db.add_documents(documents)
@@ -285,7 +375,42 @@ files_to_add = [
 for file in files_to_add:
     full_path = os.path.join(BASE_DIR, file)
     if os.path.exists(full_path):
-        ingest_file_into_db(full_path, db)
+        try:
+            ingest_file_into_db(full_path, db)
+        except Exception as e:
+            logger.warning("Could not index %s: %s", file, e)
+
+# Product documents (Word / PowerPoint / PDF) in the "product page" folder.
+# A file that fails (e.g. OCR permission problems) is logged and skipped so
+# the API can still start.
+PRODUCT_DIR = os.path.join(BASE_DIR, "product page")
+
+# Files in the folder that must NOT be indexed because the bot is public.
+# DPDP_ELCOT_All_Products_Pricing.pdf is a client-specific commercial proposal
+# ("owner review") with list prices and discount tiers.
+PRODUCT_FILES_EXCLUDED = {"DPDP_ELCOT_All_Products_Pricing.pdf"}
+
+if os.path.isdir(PRODUCT_DIR):
+    product_files = sorted(
+        (f for f in os.listdir(PRODUCT_DIR)
+         if f.lower().endswith((".pdf", ".docx", ".pptx"))
+         and f not in PRODUCT_FILES_EXCLUDED),
+        key=lambda f: (len(f), f),  # originals before "name (1).ext" copies
+    )
+    for file in product_files:
+        try:
+            ingest_file_into_db(os.path.join(PRODUCT_DIR, file), db)
+        except Exception as e:
+            logger.warning("Could not index %s: %s", file, e)
+
+# Website pages listed in website_pages.txt.
+# A page that fails to load is logged and skipped so the API can still start.
+for page_url in load_urls(os.path.join(BASE_DIR, "website_pages.txt")):
+    time.sleep(1)  # the site's robots.txt asks for at most 1 request per second
+    try:
+        ingest_url_into_db(page_url, db)
+    except Exception as e:
+        logger.warning("Could not index %s: %s", page_url, e)
 
 
 # ==========================================================
@@ -303,7 +428,15 @@ class HybridRetriever(BaseRetriever):
         bm25_docs = self.bm25_retriever.invoke(query)
         vector_docs = self.vector_retriever.invoke(query)
 
-        combined = bm25_docs + vector_docs
+        # Alternate between the two result lists so both searches contribute.
+        # (Concatenating them meant the first k results were all BM25, and the
+        # vector results were cut off.)
+        combined = [
+            doc
+            for pair in zip_longest(bm25_docs, vector_docs)
+            for doc in pair
+            if doc is not None
+        ]
 
         seen = set()
         unique_docs = []
@@ -334,7 +467,12 @@ def setup_hybrid_retriever():
         for d, m in zip(all_docs["documents"], all_docs["metadatas"])
     ]
 
-    bm25 = BM25Retriever.from_documents(documents)
+    # Default BM25 tokenizing is a case-sensitive split on spaces, so "Zenom?"
+    # would never match "ZENOM". Lowercase and keep only word characters.
+    bm25 = BM25Retriever.from_documents(
+        documents,
+        preprocess_func=lambda text: re.findall(r"\w+", text.lower()),
+    )
     bm25.k = 10
 
     vector_retriever = db.as_retriever(

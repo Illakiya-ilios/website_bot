@@ -12,6 +12,7 @@ can never send visitors to an arbitrary or external URL. Paths are relative
 To add a page: add an entry to SITE_PAGES. The words in the path are matched
 automatically; add extra phrases to "aliases" for names people actually use.
 """
+import difflib
 import re
 
 # path -> (label shown in the chat reply, extra aliases)
@@ -93,14 +94,27 @@ SITE_PAGES = {
     "/services/software-development/quality-engineering-test-automation": ("Quality Engineering & Test Automation", ["test automation", "quality engineering", "qa", "testing"]),
 }
 
-# The visitor must clearly ask to go somewhere. Plain questions such as
-# "what is Zenom?" are answered in the chat and do not navigate.
+# Navigation only happens when the visitor explicitly asks to be taken to a
+# page ("can you take me to...", "go to...", "open the ... page"). Questions
+# such as "what is Zenom?" or "tell me about your case studies" are answered
+# in the chat and never move the visitor.
 _NAV_INTENT = re.compile(
-    r"\b(open|take me|go to|goto|navigate|bring me|redirect|direct me|visit|"
-    r"show me (?:the|your)|link (?:to|for)|where (?:can|do) i (?:find|see))\b"
-    r"|\bpage\b",
+    r"\b(?:take|bring|get) me (?:to|over to|back to)\b"
+    r"|\b(?:go|goto|navigate|head)(?: over)? to\b"
+    r"|\bredirect me\b|\bdirect me to\b"
+    r"|\bopen (?:up )?(?:the|your|our)\b"
+    r"|^\s*open\b",
     re.IGNORECASE,
 )
+
+# Words that are never spell-corrected (request filler, not page names).
+_FILLER = {
+    "the", "your", "our", "you", "can", "could", "would", "will", "please", "pls",
+    "plz", "kindly", "take", "bring", "get", "me", "to", "go", "goto", "over",
+    "navigate", "head", "open", "redirect", "direct", "page", "pages", "section",
+    "site", "website", "link", "ilios", "digital", "company", "companies",
+    "want", "like", "need", "and", "for", "with", "this", "that", "there",
+}
 
 
 def _normalize(text: str) -> str:
@@ -130,10 +144,49 @@ def _build_index():
 
 _INDEX = _build_index()
 
+# Every word that appears in a page name or alias, used for spell correction.
+_VOCAB = sorted({word for phrase, _, _ in _INDEX for word in phrase.split()})
+
+
+def _correct_spelling(text: str) -> str:
+    """
+    Replace misspelled words with the closest page-name word, e.g.
+    "carrers" -> "careers", "quantam" -> "quantum", "stuides" -> "studies".
+    Short words (under 4 letters) are left alone, because one wrong letter
+    there would match too many unrelated names.
+    """
+    corrected = []
+    for word in text.split():
+        if len(word) >= 4 and word not in _FILLER and word not in _VOCAB:
+            close = difflib.get_close_matches(word, _VOCAB, n=1, cutoff=0.8)
+            if close:
+                word = close[0]
+        corrected.append(word)
+    return " " + " ".join(corrected) + " "
+
 
 def find_navigation(message: str):
     """
     Return (path, label) if the message asks to open a known page, else None.
+
+    The message is matched as typed and again after spell correction, and the
+    better (more specific) match wins. Correction only changes words that are
+    not already page-name words, so a correctly spelled match is never lost.
+    """
+    if not _NAV_INTENT.search(message):
+        return None
+
+    text = _normalize(message)
+    candidates = [m for m in (_match(text), _match(_correct_spelling(text))) if m]
+    if not candidates:
+        return None
+    path, label, _ = max(candidates, key=lambda m: m[2])
+    return path, label
+
+
+def _match(text: str):
+    """
+    Find the best page for normalized text.
 
     Scoring:
     - Each matching page scores the length of its longest matched phrase.
@@ -142,10 +195,6 @@ def find_navigation(message: str):
       and "AWS partner page" opens /partners/aws.
     - A parent is dropped when one of its child pages also matched.
     """
-    if not _NAV_INTENT.search(message):
-        return None
-
-    text = _normalize(message)
     matched = {}  # path -> (longest phrase length, label)
     for phrase, path, label in _INDEX:
         if f" {phrase} " in text and len(phrase) > matched.get(path, (0, ""))[0]:
@@ -164,4 +213,4 @@ def find_navigation(message: str):
         if score > best_score:
             best_path, best_score = path, score
 
-    return best_path, matched[best_path][1]
+    return best_path, matched[best_path][1], best_score

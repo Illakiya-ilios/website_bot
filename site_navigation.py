@@ -118,8 +118,13 @@ def _build_index():
             phrases.add(slug.replace("-", " "))
         for p in phrases:
             norm = _normalize(p).strip()
-            if norm:
-                index.append((norm, path, label))
+            if not norm:
+                continue
+            index.append((norm, path, label))
+            # Also accept the phrase written as one word ("casestudy",
+            # "aboutus"), a common way visitors type multi-word names.
+            if " " in norm:
+                index.append((norm.replace(" ", ""), path, label))
     return index
 
 

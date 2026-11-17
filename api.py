@@ -32,6 +32,7 @@ from itertools import zip_longest
 from typing import Dict, List
 
 from guard import check_input, check_output
+from site_navigation import find_navigation
 from web_ingest import load_urls, read_web_page
 import hashlib
 import io
@@ -134,6 +135,9 @@ class SessionMemoryManager:
     def __init__(self, max_messages: int = 8):
         self.sessions: Dict[str, List[Dict[str, str]]] = defaultdict(list)
         self.max_messages = max_messages
+        # Label of the last website page the chat opened, per session, used
+        # to resolve follow-ups like "what was the outcome of that project?"
+        self.last_page: Dict[str, str] = {}
 
     def add_message(self, session_id: str, role: str, content: str):
         self.sessions[session_id].append({
@@ -152,6 +156,7 @@ class SessionMemoryManager:
     def clear_session(self, session_id: str):
         if session_id in self.sessions:
             del self.sessions[session_id]
+        self.last_page.pop(session_id, None)
 
     def _trim(self, session_id: str):
         """
@@ -525,7 +530,8 @@ REFUSAL_MESSAGE = (
 prompt = PromptTemplate(
     input_variables=["question", "context", "history"],
     template="""
-You are a professional sales agent in ilios digital with 3 years of experience.
+You are a professional sales agent at Ilios Digital.
+Never state how many years of experience you personally have.
 (Ilios Digital is a company that provides cloud migration, infrastructure management, application development and AI/ML services)
 
 You speak confidently in the first person and naturally as if this is your own product knowledge.
@@ -551,12 +557,39 @@ answer ONLY the part about Ilios Digital's own strengths and do NOT mention or c
 If the question is purely a comparison request, use the refusal sentence.
 
 RESPONSE RULES (for in-scope questions):
-1) Be friendly, confident, and customer-focused
-2) Keep responses short and crisp (2–4 sentences max)
-3) Highlight key benefits or important details clearly
-4) If exact details (pricing, features, numbers) are available, quote them accurately
-5) If the context lacks the Ilios Digital detail asked for, say:
+1) Be friendly, confident, and customer-focused.
+2) LENGTH. Default to 1-3 sentences (under 60 words). Only write more (up to about 150 words)
+   when the user explicitly asks for detail, an explanation, steps, or an in-depth description
+   of a specific product or case study.
+3) LISTS. When the answer is a list (technologies, features, services), name AT MOST 5 items
+   in total, the most relevant ones, in one sentence, then offer to share more.
+4) FORMAT. Plain text only. No headings, no bold, no markdown, no bullet lists.
+5) Get straight to the answer. Only greet the user (or use their name) when their message is
+   itself a greeting. Otherwise never start with "Hi", their name, or filler such as
+   "I'd be happy to". End with at most one short follow-up question about Ilios Digital's
+   services. Never offer to set up, schedule or arrange a call or meeting yourself.
+6) NUMBERS. Only quote prices, costs, durations, timelines, percentages or other figures that
+   appear word-for-word in the context, and only for the project or product they belong to.
+   Never estimate, invent, or combine figures, and never give price or time ranges of your own.
+7) PRICING. If asked about price or cost and no exact figure is in the context, reply:
+   "Our pricing is customized based on the specific needs of each organization. For a tailored
+   quote, please reach our team at sales@ilios.digital or +91 9150022260."
+8) TIMELINES. If asked how long something takes and no exact figure is in the context, say it
+   depends on the scope and that our team can scope it with them, giving the contact details.
+   Do not guess a duration.
+9) If the context lacks the Ilios Digital detail asked for, say:
    "I don't have that information available right now."
+10) ACTIONS. You are a chat assistant only. You cannot schedule or book calls or meetings, send
+   emails, create tickets, or take any other action, and you must never say or imply that you
+   have done so (never say "I've scheduled", "I've booked", "I've sent", "our team will contact
+   you"). When the user wants a call, a meeting, a quote, or to talk to someone, tell them to
+   reach the team directly using the contact details below.
+
+CONTACT DETAILS. Include these ONLY when the user asks about price, cost, timelines, a call,
+a meeting, a demo, or how to contact or talk to the team. Do NOT add them to any other answer:
+- Email: sales@ilios.digital
+- Phone: +91 9150022260
+- Contact form: https://www.ilios.digital/contact
 
 Never say:
 - "Based on the context"
@@ -575,6 +608,10 @@ Context:
 Question:
 {question}
 
+Reminder: answer in 1-3 plain sentences unless the user asked for detail. Lists have at most
+5 items. Do not start with "Hi" or the user's name unless they greeted you. Never state a
+price, duration or figure that is not written in the context above. You cannot schedule or
+book anything; never offer to. If the user wants to talk to the team, give the contact details.
 """,
     partial_variables={"refusal": REFUSAL_MESSAGE},
 )
@@ -582,7 +619,7 @@ Question:
 
 chain = (
     {
-        "context": lambda x: search_pdf.invoke({"query": x["question"]}),
+        "context": lambda x: search_pdf.invoke({"query": x.get("search_query") or x["question"]}),
         "question": lambda x: x["question"],
         "history": lambda x: x["history"],
     }
@@ -590,20 +627,80 @@ chain = (
     | llm
 )
 
+# The bot has no calendar, email or ticketing access. These checks run in code
+# (not just the prompt) so it can never claim to have booked or sent anything.
+CONTACT_MESSAGE = (
+    "I can't book calls or meetings myself, but our team would be glad to talk. "
+    "You can email sales@ilios.digital, call +91 9150022260, or use the form at "
+    "https://www.ilios.digital/contact."
+)
+
+# User asks the bot to book/schedule something.
+_BOOKING_REQUEST = re.compile(
+    r"\b(schedule|book|arrange|set\s*up|fix|organi[sz]e)\b.{0,40}?"
+    r"\b((?<!on-)(?<!on )call|meeting|demo|appointment|slot|session)\b"
+    r"|\b(calendar invite|send (me )?(an? )?invite)\b",
+    re.IGNORECASE,
+)
+
+# Model claims (or offers) an action it cannot perform.
+_FALSE_ACTION = re.compile(
+    r"\bI(?:'ve| have) (?:just )?(?:scheduled|booked|arranged|sent|set up|organi[sz]ed)\b"
+    r"|\bI(?:'ll| will) (?:send|schedule|book|arrange|set up|organi[sz]e)\b"
+    r"|\b(?:set up|schedule|arrange|book) (?:a|the|your) (?:call|meeting|demo)\b"
+    r"|\bcalendar invite\b"
+    r"|\b(?:our|the) (?:sales )?team will (?:contact|reach out to|call|email) you\b",
+    re.IGNORECASE,
+)
+
+
+# Words that refer back to something already discussed.
+_FOLLOW_UP = re.compile(
+    r"\b(this|that|these|those|it|its|they|them|their|here|there|the page|"
+    r"the project|which one|any of)\b",
+    re.IGNORECASE,
+)
+
+
 def ask_chatbot(session_id: str, question: str):
 
     # LLM Guard: scan the user's message before it reaches the chain.
     # Blocked messages are not stored in session history.
     input_check = check_input(question)
     if not input_check.allowed:
-        return REFUSAL_MESSAGE
+        return REFUSAL_MESSAGE, None
     question = input_check.text  # secrets redacted if any
+
+    if _BOOKING_REQUEST.search(question):
+        memory_manager.add_message(session_id, "user", question)
+        memory_manager.add_message(session_id, "assistant", CONTACT_MESSAGE)
+        return CONTACT_MESSAGE, None
+
+    # Website navigation: the visitor asked to open a page. Answer instantly
+    # (no LLM call) and tell the website which page to open. Only paths from
+    # the allowlist in site_navigation.py can be returned.
+    navigation = find_navigation(question)
+    if navigation:
+        path, label = navigation
+        answer = f"Opening the {label} page for you. Feel free to keep asking me questions here."
+        memory_manager.add_message(session_id, "user", question)
+        memory_manager.add_message(session_id, "assistant", answer)
+        memory_manager.last_page[session_id] = label
+        return answer, path
 
     history = memory_manager.get_history(session_id)
 
+    # Follow-ups such as "what was the outcome of that project?" carry no
+    # search terms of their own; add the page the chat last opened.
+    search_query = question
+    last_page = memory_manager.last_page.get(session_id)
+    if last_page and _FOLLOW_UP.search(question):
+        search_query = f"{last_page} {question}"
+
     response = chain.invoke({
         "question": question,
-        "history": history
+        "history": history,
+        "search_query": search_query,
     })
 
     answer = response.content if hasattr(response, "content") else response
@@ -611,12 +708,16 @@ def ask_chatbot(session_id: str, question: str):
     # LLM Guard: scan the model's reply before returning it.
     output_check = check_output(question, answer)
     if not output_check.allowed:
-        return REFUSAL_MESSAGE
+        return REFUSAL_MESSAGE, None
+
+    if _FALSE_ACTION.search(answer):
+        logger.info("Replaced an answer that claimed or offered an action the bot can't take.")
+        answer = CONTACT_MESSAGE
 
     memory_manager.add_message(session_id, "user", question)
     memory_manager.add_message(session_id, "assistant", answer)
 
-    return answer
+    return answer, None
 
 # =========================
 #   Request / Response Models
@@ -649,6 +750,9 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
+    # Relative path of a page the website should open (e.g. "/careers"),
+    # or null when no navigation is needed.
+    navigate_to: str | None = None
 
 
 # =========================
@@ -667,11 +771,12 @@ def chat_endpoint(request: Request, chat: ChatRequest):
     # Auto-generate session ID if not provided
     session_id = chat.session_id or str(uuid.uuid4())
 
-    answer = ask_chatbot(session_id, chat.message)
+    answer, navigate_to = ask_chatbot(session_id, chat.message)
 
     return ChatResponse(
         session_id=session_id,
-        answer=answer
+        answer=answer,
+        navigate_to=navigate_to,
     )
 
 

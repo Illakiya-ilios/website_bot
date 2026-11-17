@@ -631,8 +631,8 @@ chain = (
 # (not just the prompt) so it can never claim to have booked or sent anything.
 CONTACT_MESSAGE = (
     "I can't book calls or meetings myself, but our team would be glad to talk. "
-    "You can email sales@ilios.digital, call +91 9150022260, or use the form at "
-    "https://www.ilios.digital/contact."
+    "You can email sales@ilios.digital, call +91 9150022260, or use the form on "
+    "our Contact page, which I'm opening for you."
 )
 
 # User asks the bot to book/schedule something.
@@ -641,6 +641,25 @@ _BOOKING_REQUEST = re.compile(
     r"\b((?<!on-)(?<!on )call|meeting|demo|appointment|slot|session)\b"
     r"|\b(calendar invite|send (me )?(an? )?invite)\b",
     re.IGNORECASE,
+)
+
+# User asks how to contact / reach the team. Answered with the real contact
+# details and the Contact page is opened. ("contact center" etc. don't match.)
+_CONTACT_REQUEST = re.compile(
+    r"\bcontact (?:details|info|information|number|email|page|form)\b"
+    r"|\b(?:how|where) (?:can|do|should|could|would) (?:i|we) "
+    r"(?:contact|reach|get in touch|call|email|talk|speak)\b"
+    r"|\b(?:contact|reach|call|email|ring) (?:you|your|sales|the sales|ilios|someone|the team)\b"
+    r"|\b(?:talk|speak|chat) (?:to|with) (?:someone|sales|your|a person|a human|the team|an expert|a sales)\b"
+    r"|\bget in touch\b"
+    r"|\b(?:phone|mobile|contact|telephone) number\b|\bemail (?:address|id)\b",
+    re.IGNORECASE,
+)
+
+CONTACT_PATH = "/contact"
+CONTACT_INFO_MESSAGE = (
+    "You can reach our sales team at sales@ilios.digital or +91 9150022260. "
+    "Opening our Contact page for you, where you can also send us a message."
 )
 
 # Model claims (or offers) an action it cannot perform.
@@ -674,7 +693,8 @@ def ask_chatbot(session_id: str, question: str):
     if _BOOKING_REQUEST.search(question):
         memory_manager.add_message(session_id, "user", question)
         memory_manager.add_message(session_id, "assistant", CONTACT_MESSAGE)
-        return CONTACT_MESSAGE, None
+        memory_manager.last_page[session_id] = "Contact Us"
+        return CONTACT_MESSAGE, CONTACT_PATH
 
     # Website navigation: the visitor asked to open a page. Answer instantly
     # (no LLM call) and tell the website which page to open. Only paths from
@@ -687,6 +707,13 @@ def ask_chatbot(session_id: str, question: str):
         memory_manager.add_message(session_id, "assistant", answer)
         memory_manager.last_page[session_id] = label
         return answer, path
+
+    # "How can I contact sales?" -> real contact details + open the Contact page.
+    if _CONTACT_REQUEST.search(question):
+        memory_manager.add_message(session_id, "user", question)
+        memory_manager.add_message(session_id, "assistant", CONTACT_INFO_MESSAGE)
+        memory_manager.last_page[session_id] = "Contact Us"
+        return CONTACT_INFO_MESSAGE, CONTACT_PATH
 
     history = memory_manager.get_history(session_id)
 

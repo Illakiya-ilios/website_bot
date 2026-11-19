@@ -69,6 +69,17 @@ def _failed(results_valid: dict) -> str:
     return ", ".join(name for name, ok in results_valid.items() if not ok)
 
 
+def redact_secrets(message: str) -> str:
+    """Fast (about 0.01 s) secrets redaction, safe to run before anything else."""
+    if not GUARD_ENABLED:
+        return message
+    try:
+        return _secrets_scanner.scan(message)[0]
+    except Exception:
+        logger.error("Secrets redaction failed.", exc_info=True)
+        return message
+
+
 def check_input(message: str) -> GuardResult:
     if not _input_scanners:
         return GuardResult(message, True)
